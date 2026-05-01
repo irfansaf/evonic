@@ -59,6 +59,24 @@ PROVIDER_DEFAULTS = {
         'label': 'Custom',
         'description': 'Any OpenAI-compatible endpoint',
     },
+    'azure_foundry_openai': {
+        'type': 'remote',
+        'base_url': 'https://{resource}.openai.azure.com/openai/v1',
+        'api_key_required': True,
+        'placeholder_model': 'gpt-5.4',
+        'label': 'Azure AI Foundry (OpenAI)',
+        'description': 'Azure · OpenAI-compatible endpoint',
+        'resource_required': True,
+    },
+    'azure_foundry_claude': {
+        'type': 'remote',
+        'base_url': 'https://{resource}.services.ai.azure.com/anthropic/v1',
+        'api_key_required': True,
+        'placeholder_model': 'claude-sonnet-4-6',
+        'label': 'Azure AI Foundry (Claude)',
+        'description': 'Azure · Anthropic-native endpoint',
+        'resource_required': True,
+    },
 }
 
 # ---------------------------------------------------------------------------
@@ -261,6 +279,7 @@ def run_setup(
     language: str = 'english',
     sandbox_enabled: bool = False,
     password: str = '',
+    provider_resource: str = None,
 ) -> dict:
     """
     Execute first-time setup:
@@ -299,8 +318,18 @@ def run_setup(
 
     provider_cfg = PROVIDER_DEFAULTS[provider]
 
-    # Resolve base_url: use user-provided or fall back to provider default
-    resolved_base_url = (base_url or provider_cfg['base_url']).rstrip('/')
+    # Foundry providers: require resource name and expand {resource} in base_url
+    resource = (provider_resource or '').strip() or None
+    if provider_cfg.get('resource_required') and not resource:
+        return {'error': f'Resource name is required for {provider_cfg["label"]}'}
+
+    # Resolve base_url: user-provided overrides; otherwise expand {resource} into provider default
+    if base_url:
+        resolved_base_url = base_url.rstrip('/')
+    elif resource and '{resource}' in provider_cfg['base_url']:
+        resolved_base_url = provider_cfg['base_url'].replace('{resource}', resource).rstrip('/')
+    else:
+        resolved_base_url = provider_cfg['base_url'].rstrip('/')
 
     try:
         # 1. Create model in DB as default
@@ -315,6 +344,7 @@ def run_setup(
             'model_name': model_name,
             'is_default': 1,
             'enabled': 1,
+            'provider_resource': resource,
         })
 
         # 2. Build system prompt

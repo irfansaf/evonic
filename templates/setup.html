@@ -90,6 +90,14 @@
                             class="w-full px-3 py-2.5 border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100 rounded-lg text-sm placeholder-gray-400 dark:placeholder-gray-500 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/20">
                     </div>
 
+                    <!-- Azure Resource Name (shown for Foundry providers) -->
+                    <div id="resource-row" class="hidden">
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Azure Resource Name <span class="text-red-500">*</span></label>
+                        <input type="text" id="provider-resource" placeholder="my-resource"
+                            class="w-full px-3 py-2.5 border border-gray-300 rounded-lg text-sm focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/20">
+                        <p class="text-xs text-gray-400 mt-1">Subdomain segment of your Foundry URL — Base URL is built automatically.</p>
+                    </div>
+
                     <!-- API Key -->
                     <div id="api-key-row">
                         <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">API Key <span id="api-key-required-marker" class="text-red-500">*</span><span id="api-key-optional-marker" class="hidden text-gray-400 dark:text-gray-500 font-normal">(optional)</span></label>
@@ -345,7 +353,8 @@ $('#agent-name').on('input', function() {
 
 function updateProviderForm(provider) {
     const p = PROVIDERS[provider] || {};
-    $('#base-url').val(p.base_url || '');
+    const isFoundry = !!p.resource_required;
+
     $('#model-name').attr('placeholder', p.placeholder_model || '');
 
     const apiKeyRequired = !!p.api_key_required;
@@ -357,15 +366,31 @@ function updateProviderForm(provider) {
         $('#api-key-optional-marker').removeClass('hidden');
     }
 
-    // Show base-url field only for custom provider; hide for known ones
-    if (provider === 'custom') {
-        $('#base-url').attr('placeholder', 'https://your-endpoint/v1');
-        $('#base-url-row').removeClass('hidden');
+    // Foundry providers: show resource field, auto-build base_url, hide base-url input
+    if (isFoundry) {
+        $('#resource-row').removeClass('hidden');
+        $('#base-url-row').addClass('hidden');
+        rebuildFoundryBaseUrl();
     } else {
-        // Show it but read-only style to let advanced users override
+        $('#resource-row').addClass('hidden');
         $('#base-url-row').removeClass('hidden');
+        $('#base-url').val(p.base_url || '');
+        if (provider === 'custom') {
+            $('#base-url').attr('placeholder', 'https://your-endpoint/v1');
+        }
     }
 }
+
+function rebuildFoundryBaseUrl() {
+    const provider = $('input[name="provider"]:checked').val();
+    const p = PROVIDERS[provider] || {};
+    const resource = $('#provider-resource').val().trim();
+    if (resource && p.base_url && p.base_url.indexOf('{resource}') !== -1) {
+        $('#base-url').val(p.base_url.replace('{resource}', resource));
+    }
+}
+
+$(document).on('input', '#provider-resource', rebuildFoundryBaseUrl);
 
 function resetTestResult() {
     $('#test-result').addClass('hidden').text('');
@@ -431,6 +456,9 @@ function validateStep1() {
     const p = PROVIDERS[provider] || {};
 
     clearStepError(1);
+    if (p.resource_required && !$('#provider-resource').val().trim()) {
+        showStepError(1, 'Azure resource name is required for ' + p.label + '.'); return false;
+    }
     if (!baseUrl) { showStepError(1, 'Base URL is required.'); return false; }
     if (p.api_key_required && !$('#api-key').val().trim()) {
         showStepError(1, 'API key is required for ' + p.label + '.'); return false;
@@ -484,6 +512,7 @@ function submitSetup() {
         model_name: $('#model-name').val().trim(),
         base_url: $('#base-url').val().trim(),
         api_key: $('#api-key').val().trim() || null,
+        provider_resource: $('#provider-resource').val().trim() || null,
         agent_name: $('#agent-name').val().trim(),
         agent_id: $('#agent-id').val().trim(),
         tone: $('input[name="tone"]:checked').val(),

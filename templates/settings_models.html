@@ -66,13 +66,21 @@
 
             <div class="form-group">
                 <label>Provider *</label>
-                <select id="model-provider" class="form-input">
+                <select id="model-provider" class="form-input" onchange="toggleModelFields()">
                     <option value="openrouter">OpenRouter</option>
                     <option value="togetherai">TogetherAI</option>
                     <option value="ollama">Ollama</option>
                     <option value="llama.cpp">llama.cpp</option>
                     <option value="custom">Custom</option>
+                    <option value="azure_foundry_openai">Azure AI Foundry (OpenAI)</option>
+                    <option value="azure_foundry_claude">Azure AI Foundry (Claude)</option>
                 </select>
+            </div>
+
+            <div class="form-group hidden" id="resource-group">
+                <label>Azure Resource Name *</label>
+                <input type="text" id="model-provider-resource" class="form-input" placeholder="my-resource">
+                <p class="text-xs text-gray-400 mt-1">Subdomain segment of your Foundry URL — Base URL is built automatically.</p>
             </div>
 
             <div class="form-group" id="base-url-group">
@@ -523,6 +531,7 @@ function showAddModelModal() {
     document.getElementById('modal-title').textContent = 'Add Model';
     document.getElementById('model-form').reset();
     document.getElementById('model-id').value = '';
+    toggleModelFields();
     document.getElementById('model-modal').classList.remove('hidden');
 }
 
@@ -535,6 +544,7 @@ function editModel(modelId) {
     document.getElementById('model-name').value = model.name || '';
     document.getElementById('model-type').value = model.type || 'remote';
     document.getElementById('model-provider').value = model.provider || 'custom';
+    document.getElementById('model-provider-resource').value = model.provider_resource || '';
     document.getElementById('model-base-url').value = model.base_url || '';
     document.getElementById('model-api-key').value = model.api_key || '';
     document.getElementById('model-name-param').value = model.model_name || '';
@@ -558,7 +568,8 @@ function closeModal() {
 function toggleModelFields() {
     const type = document.getElementById('model-type').value;
     const provider = document.getElementById('model-provider').value;
-    
+    const isFoundry = provider === 'azure_foundry_openai' || provider === 'azure_foundry_claude';
+
     // Show/hide API key field based on type
     const apiKeyGroup = document.getElementById('api-key-group');
     if (type === 'local' && (provider === 'ollama' || provider === 'llama.cpp')) {
@@ -566,17 +577,53 @@ function toggleModelFields() {
     } else {
         apiKeyGroup.style.display = 'block';
     }
+
+    // Show resource field for Foundry providers; auto-build base_url from resource
+    const resourceGroup = document.getElementById('resource-group');
+    const baseUrlGroup = document.getElementById('base-url-group');
+    if (isFoundry) {
+        resourceGroup.classList.remove('hidden');
+        baseUrlGroup.classList.add('hidden');
+    } else {
+        resourceGroup.classList.add('hidden');
+        baseUrlGroup.classList.remove('hidden');
+    }
+}
+
+function buildFoundryBaseUrl(provider, resource) {
+    if (!resource) return '';
+    if (provider === 'azure_foundry_openai') {
+        return `https://${resource}.openai.azure.com/openai/v1`;
+    }
+    if (provider === 'azure_foundry_claude') {
+        return `https://${resource}.services.ai.azure.com/anthropic/v1`;
+    }
+    return '';
 }
 
 async function saveModel(event) {
     event.preventDefault();
     
     const modelId = document.getElementById('model-id').value;
+    const provider = document.getElementById('model-provider').value;
+    const resource = document.getElementById('model-provider-resource').value.trim();
+    const isFoundry = provider === 'azure_foundry_openai' || provider === 'azure_foundry_claude';
+
+    if (isFoundry && !resource) {
+        toast.error('Azure resource name is required for Foundry providers.', 5000);
+        return;
+    }
+
+    const baseUrl = isFoundry
+        ? buildFoundryBaseUrl(provider, resource)
+        : document.getElementById('model-base-url').value;
+
     const modelData = {
         name: document.getElementById('model-name').value,
         type: document.getElementById('model-type').value,
-        provider: document.getElementById('model-provider').value,
-        base_url: document.getElementById('model-base-url').value,
+        provider: provider,
+        provider_resource: resource || null,
+        base_url: baseUrl,
         api_key: document.getElementById('model-api-key').value,
         model_name: document.getElementById('model-name-param').value,
         max_tokens: parseInt(document.getElementById('model-max-tokens').value) || 32768,
