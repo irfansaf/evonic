@@ -206,6 +206,13 @@ def test_connection(base_url: str, api_key: str = None) -> dict:
     """
     if not base_url:
         return {'success': False, 'message': 'Base URL is required'}
+    # Azure AI Foundry's Anthropic-native endpoint has no /models discovery
+    # route. Defer verification to first real call rather than 404'ing here.
+    if 'services.ai.azure.com/anthropic/' in base_url:
+        return {
+            'success': True,
+            'message': 'Connection will be verified on first use (Anthropic endpoints have no /models discovery).'
+        }
     url = base_url.rstrip('/') + '/models'
     headers = {}
     if api_key:
