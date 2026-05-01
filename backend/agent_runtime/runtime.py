@@ -48,7 +48,7 @@ _logger = logging.getLogger(__name__)
 # --- Configuration constants ---
 CLEANUP_INTERVAL_SECONDS = 300       # Interval between idle session cleanup sweeps (5 minutes)
 CLEANUP_TTL_SECONDS = 3600          # TTL for session state entries before cleanup (1 hour)
-WORKER_JOIN_TIMEOUT_SECONDS = 30.0  # Max time to wait for worker threads to finish on shutdown
+WORKER_JOIN_TIMEOUT_SECONDS = 5.0   # Max time to wait for worker threads to finish on shutdown
 WORKER_JOIN_MIN_TIMEOUT = 0.1       # Minimum timeout per worker join iteration (seconds)
 DEFAULT_BUFFER_SECONDS = 2          # Default message buffering delay when agent has no config (seconds)
 SESSION_BUFFER_CLEANUP_DELAY = 30.0 # Delay before cleaning up SSE session buffers (seconds)
@@ -436,7 +436,7 @@ class AgentRuntime:
         # We don't hold a class-level workers list here — instances call
         # _join_workers() themselves. The executor is shared, so we shut it down.
         _logger.info("Shutting down background executor...")
-        cls._bg_executor.shutdown(wait=True, cancel_futures=False)
+        cls._bg_executor.shutdown(wait=False, cancel_futures=True)
 
         # Cancel the cleanup timer (already done above, but defensive)
         _logger.info("Graceful shutdown complete.")
@@ -511,7 +511,7 @@ class AgentRuntime:
         self._buffer_lock = threading.Lock()
         self._workers: list[threading.Thread] = []
         for i in range(AGENT_QUEUE_WORKERS):
-            t = threading.Thread(target=self._worker, name=f'agent-worker-{i}', daemon=False)
+            t = threading.Thread(target=self._worker, name=f'agent-worker-{i}', daemon=True)
             t.start()
             self._workers.append(t)
         _logger.info("Started %d queue worker(s)", AGENT_QUEUE_WORKERS)
