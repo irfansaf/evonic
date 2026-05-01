@@ -111,6 +111,23 @@ Manage LLM configurations:
 ./evonic model rm gpt4o
 ```
 
+### Azure AI Foundry
+
+Azure AI Foundry hosts both Claude (Anthropic-native) and OpenAI models behind a single Azure resource, so one resource name and API key cover both wire formats.
+
+Two provider keys are available:
+
+- `azure_foundry_openai` — speaks the OpenAI chat-completions wire format. Use for `gpt-5.4`, `gpt-5.3-codex`, and other OpenAI-shape models.
+- `azure_foundry_claude` — speaks the Anthropic native Messages API. Use for `claude-opus-4-7`, `claude-sonnet-4-6`, `claude-haiku-4-5`.
+
+Configure either provider via the Setup Wizard or `/settings/models` in the web UI. Provide an Azure resource name and API key; the `Resource Name` field auto-builds the `base_url` in the form `https://{resource}.services.ai.azure.com/anthropic/v1` (Claude) or `https://{resource}.openai.azure.com/openai/v1` (OpenAI).
+
+Prompt caching is enabled by default for the Claude path — the system prompt is wrapped as an ephemeral cache block on every request to reduce token usage on repeated calls.
+
+Note: Anthropic's API does not allow extended thinking and tool use in the same call. When configuring a Claude model with tools, leave thinking disabled (or vice versa). Setup attempts that mix both fail fast with a clear error.
+
+See the Microsoft documentation for Foundry Claude: https://platform.claude.com/docs/en/build-with-claude/claude-in-microsoft-foundry
+
 ---
 
 [] Robin Syihab
