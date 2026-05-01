@@ -137,6 +137,22 @@ def api_test_model(model_id):
     if not model:
         return jsonify({'error': 'Model not found'}), 404
 
+    # Azure Foundry Claude speaks Anthropic's native API; there is no
+    # OpenAI-compatible /models endpoint to GET. Delegate to the SDK-aware
+    # path on LLMClient instead.
+    if model.get('provider') == 'azure_foundry_claude':
+        try:
+            from backend.llm_client import LLMClient
+            client = LLMClient(model_config=model)
+            result = client.test_connection()
+            status = 200 if result.get('success') else 400
+            return jsonify(result), status
+        except Exception as e:
+            return jsonify({
+                'success': False,
+                'error': f'Test failed: {type(e).__name__}'
+            }), 500
+
     try:
         # Try to reach the base URL
         base_url = model.get('base_url')

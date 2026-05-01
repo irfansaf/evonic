@@ -213,6 +213,8 @@ class LLMClient:
 
     def test_connection(self) -> Dict[str, Any]:
         """Test connection to the model endpoint."""
+        if self.provider == 'azure_foundry_claude':
+            return self._test_connection_anthropic()
         try:
             models_url = f"{self.base_url}/v1/models"
             headers = {"Content-Type": "application/json"}
@@ -265,6 +267,13 @@ class LLMClient:
             exponential backoff (max 60s between retries). Configurable
             retry count via llm_max_retries setting (DB default: 5).
         """
+        # Azure AI Foundry exposes Claude through Anthropic's native API, not the
+        # OpenAI shape this method speaks. Branch out to a dedicated translator.
+        if self.provider == 'azure_foundry_claude':
+            return self._chat_completion_anthropic(
+                messages, tools, temperature, enable_thinking, max_tokens, log_file
+            )
+
         url = f"{self.base_url}/chat/completions"
 
         if max_tokens is None:
@@ -540,6 +549,397 @@ class LLMClient:
                 }
 
         return last_error_result
+
+    def _test_connection_anthropic(self) -> Dict[str, Any]:
+        """Verify connectivity to an Azure AI Foundry Claude deployment.
+
+        Uses the Anthropic SDK because Foundry's Claude endpoint speaks the
+        native Anthropic API (no OpenAI-shape ``/v1/models`` route exists).
+        Sanitizes all errors so the configured api_key never leaks to callers.
+        """
+        try:
+            from anthropic import AnthropicFoundry
+        except ImportError:
+            return {
+                'success': False,
+                'error': 'anthropic SDK not installed. Run "pip install anthropic>=0.97".'
+            }
+
+        if not self.provider_resource:
+            return {
+                'success': False,
+                'error': 'Azure Foundry resource name is not configured for this model.'
+            }
+        if not self.api_key:
+            return {
+                'success': False,
+                'error': 'API key is required for Azure Foundry providers.'
+            }
+
+        try:
+            client = AnthropicFoundry(
+                api_key=self.api_key,
+                resource=self.provider_resource,
+            )
+            # Best-effort discovery; some Foundry deployments don't expose /models
+            # but a successful (or at least authenticated) call still validates the
+            # resource name and credentials.
+            models_iter = client.models.list()
+            count = 0
+            try:
+                for _ in models_iter:
+                    count += 1
+                    if count >= 5:
+                        break
+            except Exception:
+                # Iteration failed but the request itself authenticated — still OK
+                pass
+            return {
+                'success': True,
+                'message': f'Connected to Azure Foundry resource "{self.provider_resource}"',
+                'available_models': count,
+            }
+        except Exception as e:
+            # Sanitize: never include the api_key in surfaced text. Use the
+            # exception class name as a stable signal and a short, safe message.
+            err_class = type(e).__name__
+            try:
+                import anthropic as _anth
+                if isinstance(e, getattr(_anth, 'AuthenticationError', tuple())):
+                    return {'success': False, 'error': _format_llm_error('auth_error')}
+                if isinstance(e, getattr(_anth, 'NotFoundError', tuple())):
+                    return {
+                        'success': False,
+                        'error': 'Azure Foundry deployment not found. Check your resource name and model deployment.'
+                    }
+                if isinstance(e, getattr(_anth, 'RateLimitError', tuple())):
+                    return {'success': False, 'error': _format_llm_error('rate_limit_error')}
+                if isinstance(e, getattr(_anth, 'APITimeoutError', tuple())):
+                    return {'success': False, 'error': _format_llm_error('timeout_error')}
+                if isinstance(e, getattr(_anth, 'APIConnectionError', tuple())):
+                    return {'success': False, 'error': _format_llm_error('connection_error')}
+            except Exception:
+                pass
+            return {
+                'success': False,
+                'error': f'Connection failed ({err_class}). Verify resource name, API key, and network access.'
+            }
+
+    def _chat_completion_anthropic(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]],
+        temperature: Optional[float],
+        enable_thinking: bool,
+        max_tokens: Optional[int],
+        log_file: Optional[str],
+    ) -> Dict[str, Any]:
+        """Run a chat completion against Azure AI Foundry's Anthropic-native API.
+
+        Translates OpenAI-shape inputs/outputs at the boundary so all existing
+        call sites (10+ in the codebase) keep working unchanged. Mirrors the
+        retry/backoff strategy of the OpenAI path for transient failures.
+        """
+        from backend.anthropic_foundry import (
+            anthropic_response_to_openai,
+            openai_messages_to_anthropic,
+            openai_tools_to_anthropic,
+        )
+
+        # Fail-fast: thinking + tools is not supported in a single Anthropic call
+        if self.thinking and enable_thinking and tools:
+            error_detail = (
+                "Azure Foundry Claude does not support thinking and tools simultaneously. "
+                "Disable thinking on this model or remove tool definitions."
+            )
+            log_api_call(messages, None, 0, error=error_detail, log_file=log_file)
+            return {
+                "response": {"error": error_detail},
+                "duration_ms": 0,
+                "success": False,
+                "error_type": "llm_error",
+                "error_detail": error_detail,
+            }
+
+        # Determine effective max_tokens (respecting context length cap as in OpenAI path)
+        effective_max_tokens = max_tokens or self.max_tokens or 32768
+        try:
+            from models.db import db as _db
+            _ctx_len = int(_db.get_setting('llm_context_length', 0) or 0)
+            _prompt_buf = int(_db.get_setting('llm_prompt_buffer', 2048) or 2048)
+            if _ctx_len > 0:
+                effective_max_tokens = min(effective_max_tokens, _ctx_len - _prompt_buf)
+        except Exception:
+            pass
+
+        # Build thinking config
+        if self.thinking and enable_thinking:
+            budget = self.thinking_budget if self.thinking_budget > 0 else effective_max_tokens // 2
+            thinking_param: Optional[Dict[str, Any]] = {"type": "enabled", "budget_tokens": budget}
+            # Anthropic returns 422 for any temperature != 1.0 when thinking is enabled
+            effective_temperature: Optional[float] = 1.0
+        else:
+            thinking_param = None
+            effective_temperature = temperature if temperature is not None else self.temperature
+
+        # Translate OpenAI-shape inputs into Anthropic shape
+        try:
+            system, anthropic_messages = openai_messages_to_anthropic(
+                messages, enable_cache=True
+            )
+            anthropic_tools = openai_tools_to_anthropic(tools) if tools else None
+        except ValueError as ve:
+            error_detail = f"Message translation failed: {ve}"
+            log_api_call(messages, None, 0, error=error_detail, log_file=log_file)
+            return {
+                "response": {"error": error_detail},
+                "duration_ms": 0,
+                "success": False,
+                "error_type": "llm_error",
+                "error_detail": error_detail,
+            }
+
+        # Lazy SDK import — keeps cold-start cheap when the provider isn't used
+        try:
+            from anthropic import AnthropicFoundry
+            import anthropic as _anth
+        except ImportError as ie:
+            error_detail = f"anthropic SDK not installed: {ie}. Run 'pip install anthropic>=0.97'."
+            log_api_call(messages, None, 0, error=error_detail, log_file=log_file)
+            return {
+                "response": {"error": error_detail},
+                "duration_ms": 0,
+                "success": False,
+                "error_type": "llm_error",
+                "error_detail": error_detail,
+            }
+
+        if not self.provider_resource:
+            error_detail = "Azure Foundry resource name is not configured for this model."
+            log_api_call(messages, None, 0, error=error_detail, log_file=log_file)
+            return {
+                "response": {"error": error_detail},
+                "duration_ms": 0,
+                "success": False,
+                "error_type": "llm_error",
+                "error_detail": error_detail,
+            }
+
+        try:
+            client = AnthropicFoundry(
+                api_key=self.api_key,
+                resource=self.provider_resource,
+            )
+        except Exception as e:
+            error_detail = f"Failed to initialize Anthropic Foundry client: {type(e).__name__}"
+            log_api_call(messages, None, 0, error=error_detail, log_file=log_file)
+            return {
+                "response": {"error": error_detail},
+                "duration_ms": 0,
+                "success": False,
+                "error_type": "llm_error",
+                "error_detail": error_detail,
+            }
+
+        # Build SDK kwargs
+        kwargs: Dict[str, Any] = {
+            "model": self.model,
+            "max_tokens": effective_max_tokens,
+            "messages": anthropic_messages,
+        }
+        if system is not None:
+            kwargs["system"] = system
+        if anthropic_tools:
+            kwargs["tools"] = anthropic_tools
+        if thinking_param is not None:
+            kwargs["thinking"] = thinking_param
+            kwargs["temperature"] = 1.0
+        elif effective_temperature is not None:
+            kwargs["temperature"] = effective_temperature
+
+        # Retry loop mirrors the OpenAI path's exponential backoff
+        try:
+            from models.db import db as _db
+            _val = _db.get_setting('llm_max_retries', None)
+            max_retries = int(_val) if _val is not None else 5
+        except Exception:
+            max_retries = 5
+
+        last_error_result: Optional[Dict[str, Any]] = None
+        for attempt in range(1 + max_retries):
+            start_time = time.time()
+            try:
+                resp = client.messages.create(**kwargs)
+                duration_ms = int((time.time() - start_time) * 1000)
+                result = anthropic_response_to_openai(resp, duration_ms, self.model)
+                # Mirror OpenAI path's logging format
+                response_text = ""
+                thinking_text = ""
+                try:
+                    msg = result["response"]["choices"][0]["message"]
+                    response_text = msg.get("content", "") or ""
+                    thinking_text = msg.get("reasoning_content", "") or ""
+                except Exception:
+                    pass
+                log_api_call(messages, response_text, duration_ms,
+                             log_file=log_file, thinking=thinking_text or None)
+                return result
+
+            except _anth.AuthenticationError:
+                duration_ms = int((time.time() - start_time) * 1000)
+                user_msg = _format_llm_error('auth_error')
+                log_api_call(messages, None, duration_ms,
+                             error="Authentication failed against Azure Foundry endpoint",
+                             log_file=log_file)
+                return {
+                    "response": {"error": user_msg},
+                    "duration_ms": duration_ms,
+                    "success": False,
+                    "error_type": "auth_error",
+                    "error_detail": "Authentication failed against Azure Foundry endpoint.",
+                }
+
+            except _anth.NotFoundError:
+                duration_ms = int((time.time() - start_time) * 1000)
+                error_detail = (
+                    "Azure Foundry deployment not found. "
+                    "Check your resource name and model deployment."
+                )
+                log_api_call(messages, None, duration_ms, error=error_detail, log_file=log_file)
+                return {
+                    "response": {"error": error_detail},
+                    "duration_ms": duration_ms,
+                    "success": False,
+                    "error_type": "llm_error",
+                    "error_detail": error_detail,
+                }
+
+            except _anth.RateLimitError:
+                duration_ms = int((time.time() - start_time) * 1000)
+                user_msg = _format_llm_error('rate_limit_error')
+                log_api_call(messages, None, duration_ms,
+                             error=f"[attempt {attempt+1}/{1+max_retries}] Rate limited",
+                             log_file=log_file)
+                last_error_result = {
+                    "response": {"error": user_msg},
+                    "duration_ms": duration_ms,
+                    "success": False,
+                    "error_type": "rate_limit_error",
+                    "error_detail": "Rate limit exceeded.",
+                }
+                if attempt < max_retries:
+                    time.sleep(min(2 ** (attempt + 1), 60))
+                    continue
+                return last_error_result
+
+            except _anth.APITimeoutError:
+                duration_ms = int((time.time() - start_time) * 1000)
+                user_msg = _format_llm_error('request_timeout')
+                log_api_call(messages, None, duration_ms,
+                             error=f"[attempt {attempt+1}/{1+max_retries}] Anthropic API timeout",
+                             log_file=log_file)
+                last_error_result = {
+                    "response": {"error": user_msg},
+                    "duration_ms": duration_ms,
+                    "success": False,
+                    "error_type": "request_timeout",
+                    "error_detail": "Anthropic SDK request timed out.",
+                }
+                if attempt < max_retries:
+                    time.sleep(min(2 ** (attempt + 1), 60))
+                    continue
+                return last_error_result
+
+            except _anth.APIConnectionError:
+                duration_ms = int((time.time() - start_time) * 1000)
+                user_msg = _format_llm_error('connection_error')
+                log_api_call(messages, None, duration_ms,
+                             error=f"[attempt {attempt+1}/{1+max_retries}] Anthropic API connection error",
+                             log_file=log_file)
+                last_error_result = {
+                    "response": {"error": user_msg},
+                    "duration_ms": duration_ms,
+                    "success": False,
+                    "error_type": "connection_error",
+                    "error_detail": "Could not reach Azure Foundry endpoint.",
+                }
+                if attempt < max_retries:
+                    time.sleep(min(2 ** (attempt + 1), 60))
+                    continue
+                return last_error_result
+
+            except _anth.BadRequestError as e:
+                duration_ms = int((time.time() - start_time) * 1000)
+                # Anthropic's BadRequestError messages are safe — they describe
+                # the structural issue without leaking keys or internal endpoints.
+                error_detail = str(e)
+                log_api_call(messages, None, duration_ms, error=error_detail, log_file=log_file)
+                return {
+                    "response": {"error": error_detail},
+                    "duration_ms": duration_ms,
+                    "success": False,
+                    "error_type": "llm_error",
+                    "error_detail": error_detail,
+                }
+
+            except _anth.APIStatusError as e:
+                duration_ms = int((time.time() - start_time) * 1000)
+                status_code = getattr(e, 'status_code', None)
+                # 5xx is retryable; everything else is terminal
+                is_retryable = isinstance(status_code, int) and status_code >= 500
+                error_detail = f"Azure Foundry returned HTTP {status_code}"
+                log_api_call(
+                    messages, None, duration_ms,
+                    error=f"[attempt {attempt+1}/{1+max_retries}] {error_detail}",
+                    log_file=log_file,
+                )
+                last_error_result = {
+                    "response": {"error": _format_llm_error('api_error' if is_retryable else 'llm_error')},
+                    "duration_ms": duration_ms,
+                    "success": False,
+                    "error_type": "api_error" if is_retryable else "llm_error",
+                    "error_detail": error_detail,
+                }
+                if is_retryable and attempt < max_retries:
+                    time.sleep(min(2 ** (attempt + 1), 60))
+                    continue
+                return last_error_result
+
+            except ValueError as ve:
+                # Translation-layer failure raised mid-call (defensive)
+                duration_ms = int((time.time() - start_time) * 1000)
+                error_detail = str(ve)
+                log_api_call(messages, None, duration_ms, error=error_detail, log_file=log_file)
+                return {
+                    "response": {"error": error_detail},
+                    "duration_ms": duration_ms,
+                    "success": False,
+                    "error_type": "llm_error",
+                    "error_detail": error_detail,
+                }
+
+            except Exception as e:
+                duration_ms = int((time.time() - start_time) * 1000)
+                # Never surface raw exception text — may contain auth headers
+                err_class = type(e).__name__
+                log_api_call(messages, None, duration_ms,
+                             error=f"Unexpected Anthropic SDK error: {err_class}",
+                             log_file=log_file)
+                return {
+                    "response": {"error": _format_llm_error('unknown_error')},
+                    "duration_ms": duration_ms,
+                    "success": False,
+                    "error_type": "unknown_error",
+                    "error_detail": f"Unexpected Anthropic SDK error: {err_class}",
+                }
+
+        return last_error_result or {
+            "response": {"error": _format_llm_error('unknown_error')},
+            "duration_ms": 0,
+            "success": False,
+            "error_type": "unknown_error",
+            "error_detail": "Anthropic Foundry call exhausted retries without a definite error.",
+        }
 
     def extract_content(self, response: Dict[str, Any], strip_thinking: bool = True) -> str:
         """Extract text content from LLM response."""
