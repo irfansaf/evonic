@@ -33,6 +33,18 @@ _LLM_ERROR_MESSAGES = {
     'provider_error': 'The LLM provider is experiencing issues. Please try again shortly.',
     'llm_error': 'The LLM returned an error. Please try again.',
     'unknown_error': 'An unexpected error occurred with the LLM service.',
+    # Azure AI Foundry (Anthropic-native Claude path)
+    'azure_foundry_sdk_missing': 'anthropic SDK not installed. Run "pip install anthropic>=0.97".',
+    'azure_foundry_resource_missing': 'Azure Foundry resource name is not configured for this model.',
+    'azure_foundry_api_key_missing': 'API key is required for Azure Foundry providers.',
+    'azure_foundry_deployment_not_found': 'Azure Foundry deployment not found. Check your resource name and model deployment.',
+    'azure_foundry_invalid_resource': 'Failed to initialize Azure Foundry client. Verify the resource name and API key.',
+    'azure_foundry_thinking_with_tools': (
+        'Azure Foundry Claude does not support thinking and tools simultaneously. '
+        'Disable thinking on this model or remove tool definitions.'
+    ),
+    'azure_foundry_translation_error': 'Failed to translate request for Azure Foundry Claude.',
+    'azure_foundry_connection_failed': 'Connection to Azure Foundry failed. Verify resource name, API key, and network access.',
 }
 
 
@@ -562,18 +574,18 @@ class LLMClient:
         except ImportError:
             return {
                 'success': False,
-                'error': 'anthropic SDK not installed. Run "pip install anthropic>=0.97".'
+                'error': _format_llm_error('azure_foundry_sdk_missing')
             }
 
         if not self.provider_resource:
             return {
                 'success': False,
-                'error': 'Azure Foundry resource name is not configured for this model.'
+                'error': _format_llm_error('azure_foundry_resource_missing')
             }
         if not self.api_key:
             return {
                 'success': False,
-                'error': 'API key is required for Azure Foundry providers.'
+                'error': _format_llm_error('azure_foundry_api_key_missing')
             }
 
         try:
@@ -610,7 +622,7 @@ class LLMClient:
                 if isinstance(e, getattr(_anth, 'NotFoundError', tuple())):
                     return {
                         'success': False,
-                        'error': 'Azure Foundry deployment not found. Check your resource name and model deployment.'
+                        'error': _format_llm_error('azure_foundry_deployment_not_found')
                     }
                 if isinstance(e, getattr(_anth, 'RateLimitError', tuple())):
                     return {'success': False, 'error': _format_llm_error('rate_limit_error')}
@@ -622,7 +634,7 @@ class LLMClient:
                 pass
             return {
                 'success': False,
-                'error': f'Connection failed ({err_class}). Verify resource name, API key, and network access.'
+                'error': f'{_format_llm_error("azure_foundry_connection_failed")} ({err_class})'
             }
 
     def _chat_completion_anthropic(
@@ -648,17 +660,14 @@ class LLMClient:
 
         # Fail-fast: thinking + tools is not supported in a single Anthropic call
         if self.thinking and enable_thinking and tools:
-            error_detail = (
-                "Azure Foundry Claude does not support thinking and tools simultaneously. "
-                "Disable thinking on this model or remove tool definitions."
-            )
-            log_api_call(messages, None, 0, error=error_detail, log_file=log_file)
+            user_msg = _format_llm_error('azure_foundry_thinking_with_tools')
+            log_api_call(messages, None, 0, error=user_msg, log_file=log_file)
             return {
-                "response": {"error": error_detail},
+                "response": {"error": user_msg},
                 "duration_ms": 0,
                 "success": False,
                 "error_type": "llm_error",
-                "error_detail": error_detail,
+                "error_detail": user_msg,
             }
 
         # Determine effective max_tokens (respecting context length cap as in OpenAI path)
@@ -689,10 +698,11 @@ class LLMClient:
             )
             anthropic_tools = openai_tools_to_anthropic(tools) if tools else None
         except ValueError as ve:
-            error_detail = f"Message translation failed: {ve}"
+            user_msg = _format_llm_error('azure_foundry_translation_error')
+            error_detail = f"{user_msg} ({ve})"
             log_api_call(messages, None, 0, error=error_detail, log_file=log_file)
             return {
-                "response": {"error": error_detail},
+                "response": {"error": user_msg},
                 "duration_ms": 0,
                 "success": False,
                 "error_type": "llm_error",
@@ -704,10 +714,11 @@ class LLMClient:
             from anthropic import AnthropicFoundry
             import anthropic as _anth
         except ImportError as ie:
-            error_detail = f"anthropic SDK not installed: {ie}. Run 'pip install anthropic>=0.97'."
+            user_msg = _format_llm_error('azure_foundry_sdk_missing')
+            error_detail = f"{user_msg} ({ie})"
             log_api_call(messages, None, 0, error=error_detail, log_file=log_file)
             return {
-                "response": {"error": error_detail},
+                "response": {"error": user_msg},
                 "duration_ms": 0,
                 "success": False,
                 "error_type": "llm_error",
@@ -715,14 +726,14 @@ class LLMClient:
             }
 
         if not self.provider_resource:
-            error_detail = "Azure Foundry resource name is not configured for this model."
-            log_api_call(messages, None, 0, error=error_detail, log_file=log_file)
+            user_msg = _format_llm_error('azure_foundry_resource_missing')
+            log_api_call(messages, None, 0, error=user_msg, log_file=log_file)
             return {
-                "response": {"error": error_detail},
+                "response": {"error": user_msg},
                 "duration_ms": 0,
                 "success": False,
                 "error_type": "llm_error",
-                "error_detail": error_detail,
+                "error_detail": user_msg,
             }
 
         try:
@@ -731,10 +742,11 @@ class LLMClient:
                 resource=self.provider_resource,
             )
         except Exception as e:
-            error_detail = f"Failed to initialize Anthropic Foundry client: {type(e).__name__}"
+            user_msg = _format_llm_error('azure_foundry_invalid_resource')
+            error_detail = f"{user_msg} ({type(e).__name__})"
             log_api_call(messages, None, 0, error=error_detail, log_file=log_file)
             return {
-                "response": {"error": error_detail},
+                "response": {"error": user_msg},
                 "duration_ms": 0,
                 "success": False,
                 "error_type": "llm_error",
@@ -801,17 +813,14 @@ class LLMClient:
 
             except _anth.NotFoundError:
                 duration_ms = int((time.time() - start_time) * 1000)
-                error_detail = (
-                    "Azure Foundry deployment not found. "
-                    "Check your resource name and model deployment."
-                )
-                log_api_call(messages, None, duration_ms, error=error_detail, log_file=log_file)
+                user_msg = _format_llm_error('azure_foundry_deployment_not_found')
+                log_api_call(messages, None, duration_ms, error=user_msg, log_file=log_file)
                 return {
-                    "response": {"error": error_detail},
+                    "response": {"error": user_msg},
                     "duration_ms": duration_ms,
                     "success": False,
                     "error_type": "llm_error",
-                    "error_detail": error_detail,
+                    "error_detail": user_msg,
                 }
 
             except _anth.RateLimitError:
@@ -908,10 +917,11 @@ class LLMClient:
             except ValueError as ve:
                 # Translation-layer failure raised mid-call (defensive)
                 duration_ms = int((time.time() - start_time) * 1000)
-                error_detail = str(ve)
+                user_msg = _format_llm_error('azure_foundry_translation_error')
+                error_detail = f"{user_msg} ({ve})"
                 log_api_call(messages, None, duration_ms, error=error_detail, log_file=log_file)
                 return {
-                    "response": {"error": error_detail},
+                    "response": {"error": user_msg},
                     "duration_ms": duration_ms,
                     "success": False,
                     "error_type": "llm_error",
