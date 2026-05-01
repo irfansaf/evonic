@@ -34,9 +34,18 @@ def api_create_model():
         return jsonify({'success': False, 'error': 'type must be remote or local'}), 400
 
     # Validate provider
-    valid_providers = ('openrouter', 'togetherai', 'ollama', 'llama.cpp', 'custom')
+    valid_providers = ('openrouter', 'togetherai', 'ollama', 'llama.cpp', 'custom',
+                       'azure_foundry_openai', 'azure_foundry_claude')
     if data['provider'] not in valid_providers:
         return jsonify({'success': False, 'error': f'provider must be one of {valid_providers}'}), 400
+
+    # Azure Foundry providers require provider_resource (the Azure resource name).
+    # Fail fast at create time so misconfiguration surfaces immediately.
+    if data['provider'] in ('azure_foundry_openai', 'azure_foundry_claude'):
+        if not (data.get('provider_resource') or '').strip():
+            return jsonify({'success': False, 'error': 'provider_resource is required for Azure Foundry providers'}), 400
+        if not (data.get('api_key') or '').strip():
+            return jsonify({'success': False, 'error': 'api_key is required for Azure Foundry providers'}), 400
 
     model_id = data.get('id') or str(uuid.uuid4())
     new_id = db.create_model({
@@ -55,6 +64,7 @@ def api_create_model():
         'enabled': data.get('enabled', 1),
         'is_default': data.get('is_default', 0),
         'model_max_concurrent': data.get('model_max_concurrent', 1),
+        'provider_resource': data.get('provider_resource'),
     })
 
     # If this is set as default, unset other defaults

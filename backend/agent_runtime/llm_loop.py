@@ -146,6 +146,8 @@ def run_tool_loop(agent: Dict[str, Any],
                 'thinking_budget': model.get('thinking_budget', 0),
                 'max_tokens': model.get('max_tokens', 32768),
                 'temperature': model.get('temperature'),
+                'provider': model.get('provider'),
+                'provider_resource': model.get('provider_resource'),
             }
             _logger.info("Using model: %s (%s)", model.get('name'), model.get('model_name'))
         else:
@@ -174,6 +176,8 @@ def run_tool_loop(agent: Dict[str, Any],
             'timeout': _timeout,
             'thinking': False,
             'thinking_budget': 0,
+            'provider': _dm.get('provider') if _dm else None,
+            'provider_resource': _dm.get('provider_resource') if _dm else None,
         }
         _logger.info("Using agent model string override: %s", agent['model'])
 
