@@ -134,6 +134,8 @@ class LLMClient:
             self.thinking_budget = model_config.get('thinking_budget', 0)
             self.max_tokens = model_config.get('max_tokens')
             self.temperature = model_config.get('temperature')
+            self.provider = model_config.get('provider') or ''
+            self.provider_resource = model_config.get('provider_resource') or ''
         else:
             try:
                 from models.db import db
@@ -147,6 +149,8 @@ class LLMClient:
                     self.thinking_budget = int(dm.get('thinking_budget', 0))
                     self.max_tokens = dm.get('max_tokens')
                     self.temperature = dm.get('temperature')
+                    self.provider = dm.get('provider') or ''
+                    self.provider_resource = dm.get('provider_resource') or ''
                 else:
                     self.base_url = None
                     self.api_key = None
@@ -156,6 +160,8 @@ class LLMClient:
                     self.thinking_budget = 0
                     self.max_tokens = None
                     self.temperature = None
+                    self.provider = ''
+                    self.provider_resource = ''
             except Exception:
                 self.base_url = None
                 self.api_key = None
@@ -165,6 +171,8 @@ class LLMClient:
                 self.thinking_budget = 0
                 self.max_tokens = None
                 self.temperature = None
+                self.provider = ''
+                self.provider_resource = ''
         self._cached_model_name = None
 
     def get_actual_model_name(self, force_refresh: bool = False) -> str:

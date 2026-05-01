@@ -546,6 +546,12 @@ class SchemaMixin:
             except sqlite3.OperationalError:
                 pass
 
+            # Migration: add provider_resource column to llm_models (Azure Foundry resource name)
+            try:
+                cursor.execute("ALTER TABLE llm_models ADD COLUMN provider_resource TEXT DEFAULT NULL")
+            except sqlite3.OperationalError:
+                pass
+
             # Create indexes for faster queries
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_tests_domain ON tests(domain_id)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_tests_level ON tests(domain_id, level)")
